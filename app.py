@@ -1,10 +1,14 @@
 import re
+import time
+import chromadb
 import streamlit as st
 import pandas as pd
 from pathlib import Path
 import engine
 
 MAX_RAG_ROWS = 2000
+MAX_QUESTIONS = 30
+MAX_IDLE_SECONDS = 60 * 60
 
 ROUTE_LABELS = {
     "sql": "SQL (exact calculation on all rows)",
@@ -21,6 +25,29 @@ st.write("Upload CSV files and ask questions in plain English.")
 @st.cache_resource
 def get_models():
     return engine.load_embedding_model(), engine.load_llm()
+
+
+@st.cache_resource
+def get_chroma_client():
+    return chromadb.EphemeralClient()
+
+
+@st.cache_resource
+def get_last_used():
+    return {}
+
+
+def cleanup_idle_collections():
+    client = get_chroma_client()
+    last_used = get_last_used()
+    now = time.time()
+    for name, used_at in list(last_used.items()):
+        if now - used_at > MAX_IDLE_SECONDS:
+            try:
+                client.delete_collection(name)
+            except Exception:
+                pass
+            last_used.pop(name, None)
 
 
 def clean_name(filename):
@@ -47,13 +74,31 @@ def read_uploads(uploaded_files):
 
 
 def set_data(dataframes, key):
+    client = get_chroma_client()
+    last_used = get_last_used()
+    cleanup_idle_collections()
+
     skipped = [name for name, df in dataframes.items() if len(df) > MAX_RAG_ROWS]
     with st.spinner(f"Preparing {len(dataframes)} table(s)... this can take a minute."):
-        st.session_state.engine = engine.build_engine(dataframes, embedding_model, skip_tables=skipped)
+        new_engine = engine.build_engine(
+            dataframes, embedding_model, skip_tables=skipped, client=client
+        )
+    last_used[new_engine["collection"]] = time.time()
+
+    old_engine = st.session_state.get("engine")
+
     st.session_state.data_key = key
     st.session_state.tables = {name: len(df) for name, df in dataframes.items()}
     st.session_state.skipped = skipped
     st.session_state.messages = []
+    st.session_state.engine = new_engine
+
+    if old_engine:
+        try:
+            client.delete_collection(old_engine["collection"])
+        except Exception:
+            pass
+        last_used.pop(old_engine["collection"], None)
 
 
 def friendly_error(e):
@@ -62,6 +107,8 @@ def friendly_error(e):
         return "⏳ The AI service is busy (free usage limit reached). Please wait a minute and try again."
     if "api key" in text or "401" in text:
         return "🔑 There's a problem with the API key. Please check the Groq key setup."
+    if "does not exist" in text:
+        return "⌛ Your data was cleared after 1 hour of inactivity. Please upload your files (or load the sample data) again."
     return f"⚠️ Something went wrong: {e}"
 
 
@@ -111,6 +158,7 @@ with st.sidebar:
     for name, rows in st.session_state.tables.items():
         note = " (SQL only)" if name in st.session_state.skipped else ""
         st.write(f"✅ {name}: {rows:,} rows{note}")
+    st.caption(f"🧪 Collections in memory: {len(get_chroma_client().list_collections())}")
 
 for i, msg in enumerate(st.session_state.messages):
     with st.chat_message(msg["role"]):
@@ -118,12 +166,18 @@ for i, msg in enumerate(st.session_state.messages):
         if msg["role"] == "assistant":
             show_extras(msg, i)
 
-question = st.chat_input("Ask a question about your data...")
+used = st.session_state.get("question_count", 0)
+limit_reached = used >= MAX_QUESTIONS
+if limit_reached:
+    st.warning(f"You've used all {MAX_QUESTIONS} questions for this session. Thanks for trying the app! 🙏")
+question = st.chat_input("Ask a question about your data...", disabled=limit_reached)
 
 if question:
+    st.session_state.question_count = used + 1
+    get_last_used()[st.session_state.engine["collection"]] = time.time()
     st.session_state.messages.append({"role": "user", "content": question})
     with st.chat_message("user"):
-        st.markdown(question)
+        st.markdown(question.replace("$", "\\$"))
 
     with st.chat_message("assistant"):
         try:

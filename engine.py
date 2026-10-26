@@ -63,8 +63,7 @@ def get_schema(conn):
             schema += line + "\n"
     return schema
 
-
-def build_engine(dataframes, embedding_model, skip_tables=None):
+def build_engine(dataframes, embedding_model, skip_tables=None, client=None):
     skip_tables = skip_tables or []
 
     conn = sqlite3.connect(":memory:", check_same_thread=False)
@@ -72,9 +71,11 @@ def build_engine(dataframes, embedding_model, skip_tables=None):
         df.to_sql(name, conn, index=False, if_exists="replace")
     schema = get_schema(conn)
 
+    collection_name = f"data_{uuid.uuid4().hex}"
     vector_store = Chroma(
-        collection_name=f"data_{uuid.uuid4().hex}",
-        embedding_function=embedding_model
+        collection_name=collection_name,
+        embedding_function=embedding_model,
+        client=client
     )
     documents = make_documents(dataframes, skip_tables)
     for i in range(0, len(documents), 500):
@@ -87,6 +88,7 @@ def build_engine(dataframes, embedding_model, skip_tables=None):
         "schema": schema,
         "vector_store": vector_store,
         "rag_tables": rag_tables,
+        "collection": collection_name,
     }
 
 RAG_PROMPT = ChatPromptTemplate.from_messages([
