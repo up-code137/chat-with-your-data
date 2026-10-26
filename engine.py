@@ -229,13 +229,17 @@ def route_question(engine, llm, question):
 def chat(engine, llm, question):
     decision = route_question(engine, llm, question)
 
+    if decision["route"] == "rag" and not engine["rag_tables"]:
+        decision["route"] = "sql"
+
     if decision["route"] == "schema":
         answer = ask_schema(engine, llm, question)
         return {"answer": answer, "route": "schema", "sql": None, "table": None, "result": None}
 
-    if decision["route"] == "sql":
-        answer, sql, result = ask_sql(engine, llm, question)
-        return {"answer": answer, "route": "sql", "sql": sql, "table": None, "result": result}
+    if decision["route"] == "rag":
+        answer, sources = ask_rag(engine, llm, question, table=decision["table"])
+        if sources:
+            return {"answer": answer, "route": "rag", "sql": None, "table": decision["table"], "result": None}
 
-    answer, sources = ask_rag(engine, llm, question, table=decision["table"])
-    return {"answer": answer, "route": "rag", "sql": None, "table": decision["table"], "result": None}
+    answer, sql, result = ask_sql(engine, llm, question)
+    return {"answer": answer, "route": "sql", "sql": sql, "table": None, "result": result}
